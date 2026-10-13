@@ -1,0 +1,127 @@
+diff --git a/src/openwow/game/game_loop.cpp b/src/openwow/game/game_loop.cpp
+index ea40a7f..21241d9 100644
+--- a/src/openwow/game/game_loop.cpp
++++ b/src/openwow/game/game_loop.cpp
+@@ -1,4 +1,5 @@
+ #include "openwow/game/game_loop.h"
++#include "openwow/game/drone_fpv.h"
+ #include "openwow/game/arena_system.h"
+ #include "openwow/game/movement_callbacks.h"
+ #include "openwow/game/currency_system.h"
+@@ -5189,8 +5190,25 @@ void GameLoop::ResolveFrameCameraPose(const float dt) {
+   auto &commentator = CommentatorState::Get();
+   commentator.UpdateCamera(dt, objects);
+ 
+-  std::array<world::CameraPoseOverride, 2> overrides{};
++  std::array<world::CameraPoseOverride, 3> overrides{};
+   std::size_t override_count = 0;
++  bool drone_fpv = false;
++  if (world_session() != nullptr) {
++    if (const CGPlayer_C* player = world_session()->objects().GetActivePlayer()) {
++      const Position feet = player->GetPosition();
++      DroneFpvView drone{};
++      if (DroneFpvPoll(feet.x, feet.y, feet.z, &drone)) {
++        overrides[override_count++] = world::CameraPoseOverride{
++            .source = world::CameraPoseSource::kCinematic,
++            .position = {drone.x, drone.y, drone.z},
++            .forward = {drone.fx, drone.fy, drone.fz},
++            .up = {drone.ux, drone.uy, drone.uz},
++            .vertical_fov_radians = drone.vertical_fov_radians,
++        };
++        drone_fpv = true;
++      }
++    }
++  }
+   if (auto cinematic = ResolveCinematicCameraPose(cinematic_player_, frame)) {
+     overrides[override_count++] = *cinematic;
+   }
+@@ -5204,6 +5222,21 @@ void GameLoop::ResolveFrameCameraPose(const float dt) {
+   world_frame_.SetCamera(
+       render::RenderMatrix4x4View{pose.view.data(), pose.view.size()},
+       render::RenderMatrix4x4View{pose.projection.data(), pose.projection.size()});
++
++  static bool drone_hid_body = false;
++  if (world_session() != nullptr) {
++    if (CGPlayer_C* player = world_session()->objects().GetActivePlayer()) {
++      if (drone_fpv) {
++        player->Presentation().SetUnitAlpha(0.0f);
++        (void)world::Camera_SetActivePlayerBoundAlphaVisible(false);
++        drone_hid_body = true;
++      } else if (drone_hid_body) {
++        player->Presentation().SetUnitAlpha(1.0f);
++        (void)world::Camera_SetActivePlayerBoundAlphaVisible(true);
++        drone_hid_body = false;
++      }
++    }
++  }
+ }
+ 
+ void GameLoop::UpdateSoundListenerForFrame() {
+diff --git a/src/openwow/render/backend/bgfx/CMakeLists.txt b/src/openwow/render/backend/bgfx/CMakeLists.txt
+index c88d42a..58d2b5d 100644
+--- a/src/openwow/render/backend/bgfx/CMakeLists.txt
++++ b/src/openwow/render/backend/bgfx/CMakeLists.txt
+@@ -292,6 +292,7 @@ add_library(openwow_render_bgfx
+   ${PROJECT_SOURCE_DIR}/src/openwow/render/models/materials/model_ffx_render_callback.cpp
+   ${PROJECT_SOURCE_DIR}/src/openwow/render/models/animation/animation_state.cpp
+   ${PROJECT_SOURCE_DIR}/src/openwow/game/game_loop.cpp
++  ${PROJECT_SOURCE_DIR}/src/openwow/game/drone_fpv.cpp
+   ${PROJECT_SOURCE_DIR}/src/openwow/game/world_scene.cpp
+   ${PROJECT_SOURCE_DIR}/src/openwow/render/scene/object_renderer.cpp
+   ${PROJECT_SOURCE_DIR}/src/openwow/game/world_presentation_publisher.cpp
+diff --git a/src/openwow/render/m2/m2_effect_renderer.cpp b/src/openwow/render/m2/m2_effect_renderer.cpp
+index 2cd1079..e1a0a5e 100644
+--- a/src/openwow/render/m2/m2_effect_renderer.cpp
++++ b/src/openwow/render/m2/m2_effect_renderer.cpp
+@@ -178,7 +178,8 @@ struct RibbonAtlasRect {
+   if (texture_index >= model.textures.size()) {
+     return BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+   }
+-  std::uint64_t flags = 0;
++  std::uint64_t flags =
++      BGFX_SAMPLER_MIN_ANISOTROPIC | BGFX_SAMPLER_MAG_ANISOTROPIC;
+   if ((model.textures[texture_index].flags & 0x1u) == 0u) {
+     flags |= BGFX_SAMPLER_U_CLAMP;
+   }
+diff --git a/src/openwow/render/m2/m2_geometry_submitter.cpp b/src/openwow/render/m2/m2_geometry_submitter.cpp
+index 184ad60..d0933fa 100644
+--- a/src/openwow/render/m2/m2_geometry_submitter.cpp
++++ b/src/openwow/render/m2/m2_geometry_submitter.cpp
+@@ -25,7 +25,8 @@ constexpr float kRenderableOpacityThreshold = 0.0001f;
+     return BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
+   }
+   const auto& texture = model.textures[texture_index];
+-  std::uint64_t flags = 0;
++  std::uint64_t flags =
++      BGFX_SAMPLER_MIN_ANISOTROPIC | BGFX_SAMPLER_MAG_ANISOTROPIC;
+   if ((texture.flags & 0x1u) == 0u) {
+     flags |= BGFX_SAMPLER_U_CLAMP;
+   }
+diff --git a/src/openwow/render/world/wmo/wmo_renderer.cpp b/src/openwow/render/world/wmo/wmo_renderer.cpp
+index c3e2dab..2a37542 100644
+--- a/src/openwow/render/world/wmo/wmo_renderer.cpp
++++ b/src/openwow/render/world/wmo/wmo_renderer.cpp
+@@ -1381,7 +1381,8 @@ const WmoSubmitTelemetry& WmoRenderer::Render(
+         mat != nullptr ? mat->sidn_color_bgra : 0u,
+         night_glow_intensity_,
+         mat != nullptr && (mat->flags & data::wmo::kMatSidnNight) != 0u);
+-    uint32_t sampler_flags = 0;
++    uint32_t sampler_flags =
++        BGFX_SAMPLER_MIN_ANISOTROPIC | BGFX_SAMPLER_MAG_ANISOTROPIC;
+     if (mat) {
+       if (mat->clamp_s)
+         sampler_flags |= BGFX_SAMPLER_U_CLAMP;
+diff --git a/src/openwow/world/wmo/wmo_visibility.cpp b/src/openwow/world/wmo/wmo_visibility.cpp
+index a7c2172..765dfc5 100644
+--- a/src/openwow/world/wmo/wmo_visibility.cpp
++++ b/src/openwow/world/wmo/wmo_visibility.cpp
+@@ -204,7 +204,8 @@ bool ProjectPortalScreenRect(const WmoVisibilityPortal& portal,
+ 
+   if (!clip_plane(Frustum::kLeft) || !clip_plane(Frustum::kRight) ||
+       !clip_plane(Frustum::kBottom) || !clip_plane(Frustum::kTop) ||
+-      !clip_plane(Frustum::kFar) || workspace.clipped_portal.size() < 3u) {
++      !clip_plane(Frustum::kNear) || !clip_plane(Frustum::kFar) ||
++      workspace.clipped_portal.size() < 3u) {
+ 
+     return false;
+   }

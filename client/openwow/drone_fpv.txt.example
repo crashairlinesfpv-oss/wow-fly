@@ -1,0 +1,7 @@
+# Written by the client into the 3.3.5a directory you launched from.
+# pitch: degrees up from the quad nose. fov: vertical degrees. height: yards.
+# realm: optional. Omit it to follow whichever realm this client selected.
+# realm 127.0.0.1
+pitch 55
+fov 137
+height 1.6

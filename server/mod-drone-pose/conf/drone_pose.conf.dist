@@ -1,0 +1,10 @@
+#
+# DronePose
+# Empty CharacterName applies the pose to nobody.
+#
+
+DronePose.Enable = 1
+DronePose.CharacterName = ""
+DronePose.Bind = 0.0.0.0
+DronePose.Port = 47561
+DronePose.Scale = 1.0
