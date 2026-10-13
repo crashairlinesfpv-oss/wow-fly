@@ -4,15 +4,39 @@ Fly a Velocidrone quad through your own World of Warcraft 3.3.5a world. This rep
 
 You run the world yourself. Velocidrone and OpenWoW stay on the same computer, because the first-person camera is a local packet. The worldserver can be that same computer or another one.
 
+## ChromieCraft and OpenWoW
+
+[ChromieCraft](https://github.com/ChromieCraft) here means a World of Warcraft 3.3.5a install: a folder that contains `Wow.exe`, `Data/` (the MPQ archives), `Interface/`, and `WTF/`. Any other 3.3.5a client folder with those same files works the same way. This repository does not include that folder.
+
+[OpenWoW](https://github.com/rkabachenko/OpenWow-snapshot) is a separate 3.3.5a client program. You build it yourself. You then start `openwow-client` with the ChromieCraft folder as the current directory. OpenWoW reads `Data/`, `Interface/`, and `WTF/` from that folder and logs into your realm through the realm list already stored there, usually `Data/enUS/realmlist.wtf`:
+
+```
+set realmlist 127.0.0.1
+```
+
+Use your worldserver address on that line when the world is on another machine.
+
+The drone camera ships in this repo as `client/openwow/openwow.patch` plus `drone_fpv.cpp` and `drone_fpv.h`. Those changes are applied to the OpenWoW source, then you compile `openwow-client`. That program is what draws the quad view, including roll, pitch, and field of view. `Wow.exe` in the ChromieCraft folder cannot roll the camera, so the flight uses the patched OpenWoW binary, launched from the ChromieCraft directory:
+
+```bash
+cd /path/to/ChromieCraft_3.3.5a
+/path/to/OpenWow-snapshot/build/release/apps/client/openwow-client
+```
+
+```powershell
+cd C:\Path\To\ChromieCraft_3.3.5a
+C:\Path\To\OpenWow-snapshot\build\release\apps\client\openwow-client.exe
+```
+
+Section 3 is how to build that binary. The files in `client/openwow/` are the camera addition to OpenWoW.
+
 ## What you provide
 
 - An [AzerothCore](https://www.azerothcore.org/) 3.3.5a world you built, with maps extracted from your own client.
 - A character on that realm. The module moves only the name you put in its config. An empty name moves nobody.
 - [Velocidrone](https://www.velocidrone.com/) with [BepInEx 5](https://docs.bepinex.dev/) for Unity Mono, 64-bit, installed in the game directory (`BepInEx/core/BepInEx.dll`). The IL2CPP pack and BepInEx 6 will not load this plugin.
 - [OpenWoW](https://github.com/rkabachenko/OpenWow-snapshot) checked out at commit `2521e1f72eeffd661913be63d1e2b374073c316c` (tag line `OpenWoW 0.1.2`). The patch is against that snapshot.
-- Your own 3.3.5a client data (`Data/` with the MPQ archives). OpenWoW reads that folder. It does not ship the archives.
-
-The stock `Wow.exe` cannot roll the camera. Use the patched OpenWoW client for the drone view.
+- A 3.3.5a game folder such as ChromieCraft, with your own `Data/` archives. OpenWoW is started from that folder. This repo does not ship the archives.
 
 ## 1. World module
 
@@ -121,19 +145,17 @@ cmake --preset release
 cmake --build build/release --target openwow-client
 ```
 
-Launch it from your 3.3.5a directory, the one that contains `Data/`.
+Launch the built client from the ChromieCraft directory, the one that contains `Wow.exe` and `Data/`. Set `set realmlist` in that folder's `Data/enUS/realmlist.wtf` to your worldserver, then log in as the character named in `DronePose.CharacterName`.
 
 ```bash
-cd /path/to/your/3.3.5a
+cd /path/to/ChromieCraft_3.3.5a
 /path/to/OpenWow-snapshot/build/release/apps/client/openwow-client
 ```
 
 ```powershell
-cd C:\Path\To\your\3.3.5a
+cd C:\Path\To\ChromieCraft_3.3.5a
 C:\Path\To\OpenWow-snapshot\build\release\apps\client\openwow-client.exe
 ```
-
-Point the client's realm list at your worldserver and log in as the character named in `DronePose.CharacterName`.
 
 The first time the drone view runs, the client writes `drone_fpv.txt` in that directory:
 
