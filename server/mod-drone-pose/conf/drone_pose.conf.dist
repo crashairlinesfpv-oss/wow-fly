@@ -8,3 +8,17 @@ DronePose.CharacterName = ""
 DronePose.Bind = 0.0.0.0
 DronePose.Port = 47561
 DronePose.Scale = 1.0
+
+#
+# Collision = 1 sends the walls, buildings, gameobjects and terrain ahead of
+# the quad while flying. 0 sends only the ground straight below.
+#
+
+DronePose.Collision = 1
+
+#
+# EyeHeight is how far above the quad the wall test runs, in yards. Match the
+# height line in drone_fpv.txt. The ground test stays on the quad.
+#
+
+DronePose.EyeHeight = 1.6

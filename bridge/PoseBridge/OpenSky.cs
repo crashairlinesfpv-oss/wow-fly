@@ -54,6 +54,25 @@ internal static class OpenSky
         return body.position + _offset;
     }
 
+    public static void Nudge(Rigidbody body, Vector3 push)
+    {
+        if (body == null || push.sqrMagnitude < 1e-12f)
+            return;
+        Transform root = body.transform.root != null ? body.transform.root : body.transform;
+        Rigidbody[] parts = root.GetComponentsInChildren<Rigidbody>(true);
+        for (int i = 0; i < parts.Length; i++)
+        {
+            Rigidbody part = parts[i];
+            if (part == null)
+                continue;
+            Vector3 velocity = part.velocity;
+            Vector3 angular = part.angularVelocity;
+            part.position += push;
+            part.velocity = velocity;
+            part.angularVelocity = angular;
+        }
+    }
+
     public static void Apply(Rigidbody body)
     {
         if (body == null)

@@ -50,7 +50,7 @@ The same type 1 datagram is also sent to `127.0.0.1:47562` for the local camera 
 
 ## Contact (server → sim), type 2
 
-Defined now so the socket stays compatible. The server sends type 2 to the source of the latest pose. The plugin applies contacts whose `flags` bit 0 is set to that same rigidbody. No contact leaves motor output unchanged.
+The server sends type 2 to the source of the latest pose while it is moving the pilot. The plugin applies contacts whose `flags` bit 0 is set to that same rigidbody. No contact leaves motor output unchanged. Packet bytes are unchanged.
 
 The server replies to the source address of the latest pose, same port.
 
@@ -65,4 +65,10 @@ The server replies to the source address of the latest pose, same port.
 
 `flags` bit 0: solid. Other bits reserved 0.
 
-Phase 4 casts a few rays against the guest's vmaps (or the client's collision if that is already in process) and fills this. The plugin applies the contacts to the same rigidbody. The flight model never parses ADT files.
+With `DronePose.Collision = 1` the server fills at most two contacts per pose. The first is a sweep from the camera (`DronePose.EyeHeight` yards above the quad, default 1.6) along its velocity, `speed × 0.25 s + 2` yards long and at most 30, against static vmaps, gameobjects in the pilot's phase, and the terrain heightmap. The ray has no thickness. The second is the floor under the quad, sent when the pose is within 3 yards of it, more when falling. With `DronePose.Collision = 0` only the old floor contact is sent, with an up normal.
+
+The plugin keeps the quad `BodyRadius` in front of each plane for 0.2 s. Speed into the plane is removed. At `CrashSpeed` or faster the quad stops and drops for `CrashSeconds`. Velocidrone scenery stays off while flying. The flight model never parses ADT files.
+
+## Collision toggle (client → sim)
+
+Local only. UDP `127.0.0.1:47563`. One datagram, 7 bytes: magic `WDRN`, version `1`, type `3`, reserved `0`. Each datagram flips collision on the plugin. Collision starts on. The world keeps sending surfaces either way; the plugin applies them only while the switch is on.

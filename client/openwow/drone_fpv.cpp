@@ -44,6 +44,7 @@ namespace openwow::game {
 namespace {
 
 constexpr int kCameraPort = 47562;
+constexpr int kTogglePort = 47563;
 constexpr float kEngageSpeed = 1.5f;
 constexpr float kReleaseSpeed = 0.6f;
 constexpr float kReleaseRadius = 1.2f;
@@ -470,6 +471,42 @@ void ApplyCameraAngle(DroneFpvView* out) {
   out->vertical_fov_radians = g_fov_deg * (kPi / 180.0f);
 }
 
+void SendCollisionToggle() {
+#if defined(_WIN32)
+  WSADATA data{};
+  if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+    return;
+  }
+#endif
+  const SocketHandle fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd == kBadSocket) {
+    return;
+  }
+  const unsigned char buf[7] = {'W', 'D', 'R', 'N', 1, 3, 0};
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(kTogglePort);
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ::sendto(fd, reinterpret_cast<const char*>(buf), sizeof(buf), 0,
+           reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  CloseSocket(fd);
+  openwow::diagnostics::Log(openwow::diagnostics::LogLevel::kInfo,
+                            "DroneFpv collision toggle");
+}
+
+void PollCollisionKey() {
+  const Uint8* keys = SDL_GetKeyboardState(nullptr);
+  if (keys == nullptr) {
+    return;
+  }
+  static bool held = false;
+  const bool down = keys[SDL_SCANCODE_F8] != 0;
+  if (down && !held) {
+    SendCollisionToggle();
+  }
+  held = down;
+}
+
 void Drain() {
   EnsureSocket();
   if (g_socket == kBadSocket) {
@@ -526,6 +563,7 @@ bool DroneFpvPoll(float player_x, float player_y, float player_z, DroneFpvView* 
     return false;
   }
 
+  PollCollisionKey();
   Drain();
   if (!g_have_pose || !g_flying) {
     return false;

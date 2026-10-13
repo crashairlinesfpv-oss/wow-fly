@@ -21,6 +21,7 @@ mcs -target:library -out:"$OUT/PoseBridge.dll" -sdk:4.7.2 \
   -r:"$MAN/UnityEngine.dll" \
   -r:"$MAN/UnityEngine.CoreModule.dll" \
   -r:"$MAN/UnityEngine.PhysicsModule.dll" \
+  -r:"$MAN/UnityEngine.InputLegacyModule.dll" \
   "$ROOT/PosePacket.cs" \
   "$ROOT/ContactApply.cs" \
   "$ROOT/OpenSky.cs" \

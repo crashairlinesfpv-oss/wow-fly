@@ -21,6 +21,16 @@
 #include "SharedDefines.h"
 #include "pose_map.hpp"
 
+// AzerothCore moved the vmap trees onto Map. Older trees reach the static
+// tree through VMapFactory and the dynamic one through Map::GetObjectHitPos.
+#if __has_include("MapCollisionData.h")
+#define DRONE_POSE_MAP_COLLISION 1
+#else
+#define DRONE_POSE_MAP_COLLISION 0
+#include "VMapFactory.h"
+#include "VMapMgr2.h"
+#endif
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cmath>
@@ -47,6 +57,20 @@ constexpr float SPLINE_INTERVAL_SEC = 0.05f;
 constexpr float FLY_HEIGHT = 1.5f;
 constexpr uint32 STALE_MS = 1000;
 
+// Collision. All distances are yards. The server only finds surfaces; the
+// plugin keeps the quad on the right side of them every physics step.
+constexpr float SWEEP_SECONDS = 0.25f;
+constexpr float SWEEP_EXTRA = 2.0f;
+constexpr float SWEEP_MAX = 30.0f;
+constexpr float SWEEP_MIN_SPEED = 0.3f;
+constexpr float NORMAL_OFFSET = 0.35f;
+constexpr float TERRAIN_STEP = 0.5f;
+constexpr float FLOOR_START = 0.5f;
+constexpr float FLOOR_RANGE = 3.0f;
+constexpr float FLOOR_SEARCH = 50.0f;
+constexpr float FLOOR_SLOPE_LIMIT = 1.5f;
+constexpr float EYE_HEIGHT_DEFAULT = 1.6f;
+
 class DronePoseService
 {
 public:
@@ -63,6 +87,10 @@ public:
         _bind = sConfigMgr->GetOption<std::string>("DronePose.Bind", "0.0.0.0");
         _port = sConfigMgr->GetOption<int32>("DronePose.Port", PORT_DEFAULT);
         _scale = sConfigMgr->GetOption<float>("DronePose.Scale", SCALE_DEFAULT);
+        _collision = sConfigMgr->GetOption<bool>("DronePose.Collision", true);
+        _eye = sConfigMgr->GetOption<float>("DronePose.EyeHeight", EYE_HEIGHT_DEFAULT);
+        if (_eye < 0.f)
+            _eye = 0.f;
         if (_port <= 0 || _port > 65535)
             _port = PORT_DEFAULT;
     }
@@ -104,8 +132,8 @@ public:
             ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
         _fd = fd;
-        LOG_INFO("server.worldserver", "DronePose listening on {}:{} scale {:.3f} character '{}'",
-            _bind, _port, _scale, _name.empty() ? "(nobody)" : _name);
+        LOG_INFO("server.worldserver", "DronePose listening on {}:{} scale {:.3f} character '{}' collision {}",
+            _bind, _port, _scale, _name.empty() ? "(nobody)" : _name, _collision ? "on" : "ground only");
     }
 
     void Close()
@@ -156,7 +184,10 @@ public:
             return;
 
         Follow(player, latest, wow);
-        SendGroundContact(player, latest, from);
+        if (_collision)
+            SendContacts(player, latest, from);
+        else
+            SendGroundContact(player, latest, from);
     }
 
     void OnIdle()
@@ -371,7 +402,215 @@ private:
         ::sendto(_fd, buf, n, 0, reinterpret_cast<sockaddr const*>(&to), sizeof(to));
     }
 
+    struct Vec
+    {
+        float x, y, z;
+    };
+
+    static Vec Add(Vec a, Vec b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+    static Vec Sub(Vec a, Vec b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+    static Vec Mul(Vec a, float s) { return { a.x * s, a.y * s, a.z * s }; }
+    static float Dot(Vec a, Vec b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    static Vec Cross(Vec a, Vec b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
+    static float Len(Vec a) { return std::sqrt(Dot(a, a)); }
+
+    static bool Unit(Vec& a)
+    {
+        float l = Len(a);
+        if (!(l > 1e-6f))
+            return false;
+        a = Mul(a, 1.f / l);
+        return true;
+    }
+
+    static bool Cast(Map* map, uint32 phase, Vec a, Vec b, Vec& hit)
+    {
+        bool found = false;
+        float best = Len(Sub(b, a));
+        auto keep = [&](float rx, float ry, float rz)
+        {
+            Vec p = { rx, ry, rz };
+            float d = Len(Sub(p, a));
+            if (d <= best)
+            {
+                best = d;
+                hit = p;
+                found = true;
+            }
+        };
+
+        float rx, ry, rz;
+#if DRONE_POSE_MAP_COLLISION
+        if (map->GetMapCollisionData().GetStaticTree().GetObjectHitPos(a.x, a.y, a.z, b.x, b.y, b.z, rx, ry, rz, 0.f))
+            keep(rx, ry, rz);
+        if (map->GetMapCollisionData().GetDynamicTree().GetObjectHitPos(phase, a.x, a.y, a.z, b.x, b.y, b.z, rx, ry, rz, 0.f))
+            keep(rx, ry, rz);
+#else
+        if (VMAP::VMapFactory::createOrGetVMapMgr()->GetObjectHitPos(map->GetId(), a.x, a.y, a.z, b.x, b.y, b.z, rx, ry, rz, 0.f))
+            keep(rx, ry, rz);
+        if (map->GetObjectHitPos(phase, a.x, a.y, a.z, b.x, b.y, b.z, rx, ry, rz, 0.f))
+            keep(rx, ry, rz);
+#endif
+
+        Vec t;
+        if (CastTerrain(map, a, b, t))
+            keep(t.x, t.y, t.z);
+        return found;
+    }
+
+    static bool CastTerrain(Map* map, Vec a, Vec b, Vec& hit)
+    {
+        float startGround = map->GetGridHeight(a.x, a.y);
+        if (startGround <= INVALID_HEIGHT || a.z < startGround)
+            return false;
+
+        Vec d = Sub(b, a);
+        float len = Len(d);
+        int steps = static_cast<int>(std::ceil(len / TERRAIN_STEP));
+        if (steps < 1)
+            steps = 1;
+        float lo = 0.f;
+        for (int i = 1; i <= steps; ++i)
+        {
+            float hi = static_cast<float>(i) / steps;
+            Vec p = Add(a, Mul(d, hi));
+            float g = map->GetGridHeight(p.x, p.y);
+            if (g > INVALID_HEIGHT && p.z <= g)
+            {
+                for (int k = 0; k < 6; ++k)
+                {
+                    float mid = 0.5f * (lo + hi);
+                    Vec m = Add(a, Mul(d, mid));
+                    float gm = map->GetGridHeight(m.x, m.y);
+                    if (gm > INVALID_HEIGHT && m.z <= gm)
+                        hi = mid;
+                    else
+                        lo = mid;
+                }
+                hit = Add(a, Mul(d, hi));
+                float gh = map->GetGridHeight(hit.x, hit.y);
+                if (gh > INVALID_HEIGHT)
+                    hit.z = gh;
+                return true;
+            }
+            lo = hi;
+        }
+        return false;
+    }
+
+    static Vec HitNormal(Map* map, uint32 phase, Vec a, Vec b, Vec h0)
+    {
+        Vec dir = Sub(b, a);
+        Vec back = Mul(dir, -1.f);
+        if (!Unit(back))
+            return { 0.f, 0.f, 1.f };
+        Vec up = { 0.f, 0.f, 1.f };
+        Vec u = Cross(dir, up);
+        if (!Unit(u))
+            u = { 1.f, 0.f, 0.f };
+        Vec w = Cross(u, dir);
+        if (!Unit(w))
+            return back;
+        u = Mul(u, NORMAL_OFFSET);
+        w = Mul(w, NORMAL_OFFSET);
+
+        Vec h1, h2;
+        if (!Cast(map, phase, Add(a, u), Add(b, u), h1) || !Cast(map, phase, Add(a, w), Add(b, w), h2))
+            return back;
+        Vec n = Cross(Sub(h1, h0), Sub(h2, h0));
+        if (!Unit(n))
+            return back;
+        if (Dot(n, back) < 0.f)
+            n = Mul(n, -1.f);
+        if (Dot(n, back) < 0.2f)
+            return back;
+        return n;
+    }
+
+    static Vec FloorNormal(Map* map, uint32 phase, Vec p, float ground)
+    {
+        float d = NORMAL_OFFSET;
+        float start = p.z + FLOOR_START;
+        float hx = map->GetHeight(phase, p.x + d, p.y, start, true, FLOOR_SEARCH);
+        float hy = map->GetHeight(phase, p.x, p.y + d, start, true, FLOOR_SEARCH);
+        if (hx <= INVALID_HEIGHT || hy <= INVALID_HEIGHT
+            || std::fabs(hx - ground) > FLOOR_SLOPE_LIMIT || std::fabs(hy - ground) > FLOOR_SLOPE_LIMIT)
+            return { 0.f, 0.f, 1.f };
+        Vec n = { -(hx - ground) / d, -(hy - ground) / d, 1.f };
+        if (!Unit(n))
+            return { 0.f, 0.f, 1.f };
+        return n;
+    }
+
+    ContactView ToUnity(Vec p, Vec n) const
+    {
+        float scale = _scale == 0.f ? SCALE_DEFAULT : _scale;
+        ContactView c;
+        float ux, uy, uz;
+        MapWowToUnity(p.x - _ax, p.y - _ay, p.z - _az, scale, ux, uy, uz);
+        c.px = _aux + ux;
+        c.py = _auy + uy;
+        c.pz = _auz + uz;
+        c.nx = -n.y;
+        c.ny = n.z;
+        c.nz = n.x;
+        c.flags = 1;
+        return c;
+    }
+
+    void SendContacts(Player* player, PoseView const& pose, sockaddr_in const& to)
+    {
+        if (!_haveAnchor || !_control)
+            return;
+
+        Map* map = player->GetMap();
+        if (!map)
+            return;
+        uint32 phase = player->GetPhaseMask();
+
+        float x, y, z;
+        Place(pose, x, y, z);
+        if (!Acore::IsValidMapCoord(x, y, z))
+            return;
+        Vec p = { x, y, z };
+
+        float scale = _scale == 0.f ? SCALE_DEFAULT : _scale;
+        Vec v = { pose.vz * scale, -pose.vx * scale, pose.vy * scale };
+        float speed = Len(v);
+
+        ContactView contacts[CONTACT_MAX];
+        uint8_t count = 0;
+
+        if (speed > SWEEP_MIN_SPEED)
+        {
+            float reach = speed * SWEEP_SECONDS + SWEEP_EXTRA;
+            if (reach > SWEEP_MAX)
+                reach = SWEEP_MAX;
+            Vec eye = p;
+            eye.z += _eye;
+            Vec end = Add(eye, Mul(v, reach / speed));
+            Vec hit;
+            if (Acore::IsValidMapCoord(end.x, end.y, end.z) && Cast(map, phase, eye, end, hit))
+                contacts[count++] = ToUnity(hit, HitNormal(map, phase, eye, end, hit));
+        }
+
+        float ground = map->GetHeight(phase, x, y, z + FLOOR_START, true, FLOOR_SEARCH);
+        float fall = v.z < 0.f ? -v.z * SWEEP_SECONDS : 0.f;
+        if (ground > INVALID_HEIGHT && z - ground < FLOOR_RANGE + fall && count < CONTACT_MAX)
+            contacts[count++] = ToUnity({ x, y, ground }, FloorNormal(map, phase, p, ground));
+
+        if (count == 0)
+            return;
+        uint8_t buf[8 + CONTACT_STRIDE * CONTACT_MAX];
+        size_t n = PackContacts(contacts, count, buf, sizeof(buf));
+        if (n == 0)
+            return;
+        ::sendto(_fd, buf, n, 0, reinterpret_cast<sockaddr const*>(&to), sizeof(to));
+    }
+
     bool _enable = true;
+    bool _collision = true;
+    float _eye = EYE_HEIGHT_DEFAULT;
     std::string _name;
     std::string _bind = "0.0.0.0";
     int32 _port = PORT_DEFAULT;

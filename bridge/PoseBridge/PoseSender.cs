@@ -20,11 +20,23 @@ public class PoseSender : MonoBehaviour
             return;
 
         OpenSky.Apply(_body);
+        if (!OpenSky.IsFlying)
+            ContactApply.Reset();
         if (!OpenSky.ShouldPublish)
             return;
 
-        if (!OpenSky.IsFlying && _contacts != null && Time.fixedTime <= _contactsUntil)
+        bool fresh = _contacts != null && Time.fixedTime <= _contactsUntil;
+        if (OpenSky.IsFlying)
+        {
+            if (PoseBridgePlugin.CollisionsEnabled)
+                ContactApply.Fly(_body, fresh ? _contacts : null,
+                    PoseBridgePlugin.BodyRadiusValue, PoseBridgePlugin.CrashSpeedValue, PoseBridgePlugin.CrashSecondsValue,
+                    PoseBridgePlugin.EyeHeightValue);
+        }
+        else if (fresh)
+        {
             ContactApply.Apply(_body, _contacts);
+        }
 
         PoseBridgePlugin.Publish(_body);
     }

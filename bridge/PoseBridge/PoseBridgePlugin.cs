@@ -12,7 +12,7 @@ public class PoseBridgePlugin : BaseUnityPlugin
 {
     public const string PluginGuid = "com.crash.velocidrone.posebridge";
     public const string PluginName = "PoseBridge";
-    public const string PluginVersion = "0.1.12";
+    public const string PluginVersion = "0.1.15";
 
     static ManualLogSource Log;
     static ConfigEntry<bool> Enabled;
@@ -22,14 +22,47 @@ public class PoseBridgePlugin : BaseUnityPlugin
     static ConfigEntry<string> CameraHost;
     static ConfigEntry<int> CameraPort;
     static ConfigEntry<bool> OpenSkyFlight;
+    static ConfigEntry<bool> Collisions;
+    static ConfigEntry<float> BodyRadius;
+    static ConfigEntry<float> CrashSpeed;
+    static ConfigEntry<float> CrashSeconds;
+    static ConfigEntry<float> EyeHeight;
 
     public static bool OpenSkyEnabled
     {
         get { return OpenSkyFlight == null || OpenSkyFlight.Value; }
     }
 
+    public static bool CollisionsEnabled
+    {
+        get { return Collisions == null || Collisions.Value; }
+    }
+
+    public static float BodyRadiusValue
+    {
+        get { return BodyRadius == null ? 0.2f : Mathf.Max(0.02f, BodyRadius.Value); }
+    }
+
+    public static float CrashSpeedValue
+    {
+        get { return CrashSpeed == null ? 8f : CrashSpeed.Value; }
+    }
+
+    public static float CrashSecondsValue
+    {
+        get { return CrashSeconds == null ? 1.5f : CrashSeconds.Value; }
+    }
+
+    public static float EyeHeightValue
+    {
+        get { return EyeHeight == null ? 1.6f : Mathf.Max(0f, EyeHeight.Value); }
+    }
+
+    const int TogglePort = 47563;
+
     static UdpClient _udp;
     static UdpClient _cameraUdp;
+    static UdpClient _toggleUdp;
     static IPEndPoint _remote;
     static uint _sequence;
     static int _sentThisWindow;
@@ -47,11 +80,18 @@ public class PoseBridgePlugin : BaseUnityPlugin
         CameraHost = Config.Bind("Network", "CameraHost", "127.0.0.1", "Local camera host. Must stay on this machine.");
         CameraPort = Config.Bind("Network", "CameraPort", 47562, "Local camera port. Same type 1 datagram as the server.");
         OpenSkyFlight = Config.Bind("Flight", "OpenSky", true, "Ignore Velocidrone scenery while flying so the pose is not stopped by that map.");
+        Collisions = Config.Bind("Collision", "Enabled", true, "While flying, stop at the WoW walls, buildings and ground the worldserver sends.");
+        BodyRadius = Config.Bind("Collision", "BodyRadius", 0.2f, "Metres the quad keeps between its centre and a WoW surface.");
+        CrashSpeed = Config.Bind("Collision", "CrashSpeed", 8f, "Metres/second straight into a surface that counts as a crash. Slower touches slide. 0 never crashes.");
+        CrashSeconds = Config.Bind("Collision", "CrashSeconds", 1.5f, "After a crash the quad ignores the motors and drops for this many seconds.");
+        EyeHeight = Config.Bind("Collision", "EyeHeight", 1.6f, "Yards above the quad where walls are tested. Match drone_fpv.txt height. The ground test stays on the quad.");
         _windowStart = Time.unscaledTime;
         Application.runInBackground = true;
         AllowBackgroundRadio();
         Log.LogInfo("PoseBridge " + PluginVersion + " -> " + RemoteHost.Value + ":" + RemotePort.Value
-            + " camera " + CameraHost.Value + ":" + CameraPort.Value);
+            + " camera " + CameraHost.Value + ":" + CameraPort.Value
+            + " collision " + (CollisionsEnabled ? "on" : "off") + " (F8 toggles)");
+        EnsureToggleSocket();
     }
 
     void Update()
@@ -67,6 +107,9 @@ public class PoseBridgePlugin : BaseUnityPlugin
                 AttachToLocalQuad();
         }
         HoldRadioFocus();
+        if (Input.GetKeyDown(KeyCode.F8))
+            ToggleCollisions();
+        PollToggle();
         if (!Enabled.Value)
             return;
     }
@@ -280,26 +323,86 @@ public class PoseBridgePlugin : BaseUnityPlugin
         }
     }
 
-    static void PollContacts(Rigidbody body)
+    static void ToggleCollisions()
     {
-        if (_udp == null || _udp.Available <= 0)
+        if (Collisions == null)
             return;
-        IPEndPoint from = _remote;
-        byte[] data;
+        Collisions.Value = !Collisions.Value;
+        if (!Collisions.Value)
+            ContactApply.Reset();
+        Log.LogInfo(Collisions.Value ? "PoseBridge collisions on" : "PoseBridge collisions off");
+    }
+
+    static void EnsureToggleSocket()
+    {
+        if (_toggleUdp != null)
+            return;
         try
         {
-            data = _udp.Receive(ref from);
+            _toggleUdp = new UdpClient(new IPEndPoint(IPAddress.Loopback, TogglePort));
+            _toggleUdp.Client.Blocking = false;
         }
-        catch (SocketException)
+        catch (Exception ex)
         {
-            return;
+            Log.LogError("PoseBridge toggle socket failed: " + ex.Message);
+            if (_toggleUdp != null)
+            {
+                _toggleUdp.Close();
+                _toggleUdp = null;
+            }
         }
-        ContactSample[] contacts;
-        if (!PosePacket.TryUnpackContacts(data, data.Length, out contacts))
+    }
+
+    static void PollToggle()
+    {
+        EnsureToggleSocket();
+        if (_toggleUdp == null)
+            return;
+        for (int i = 0; i < 8 && _toggleUdp.Available > 0; i++)
+        {
+            IPEndPoint from = new IPEndPoint(IPAddress.Loopback, 0);
+            byte[] data;
+            try
+            {
+                data = _toggleUdp.Receive(ref from);
+            }
+            catch (SocketException)
+            {
+                break;
+            }
+            if (data != null && data.Length >= 7
+                && data[0] == (byte)'W' && data[1] == (byte)'D' && data[2] == (byte)'R' && data[3] == (byte)'N'
+                && data[4] == 1 && data[5] == 3)
+                ToggleCollisions();
+        }
+    }
+
+    static void PollContacts(Rigidbody body)
+    {
+        if (_udp == null)
+            return;
+        ContactSample[] latest = null;
+        for (int i = 0; i < 32 && _udp.Available > 0; i++)
+        {
+            IPEndPoint from = _remote;
+            byte[] data;
+            try
+            {
+                data = _udp.Receive(ref from);
+            }
+            catch (SocketException)
+            {
+                break;
+            }
+            ContactSample[] contacts;
+            if (PosePacket.TryUnpackContacts(data, data.Length, out contacts))
+                latest = contacts;
+        }
+        if (latest == null)
             return;
         PoseSender sender = body.GetComponent<PoseSender>();
         if (sender != null)
-            sender.SetContacts(contacts);
+            sender.SetContacts(latest);
     }
 
     static void EnsureSocket()

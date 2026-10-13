@@ -181,6 +181,8 @@ With no `realm` line, the camera follows whichever realm you selected.
 2. Log in with OpenWoW and stand where the flight should begin. That spot becomes the pad.
 3. Start Velocidrone, arm, and fly. The view switches when the quad leaves the pad (about 1.5 m/s). Cut the throttle and disarm, or bring the quad back to the pad, and the character walks again.
 
+Collision starts on. The world finds walls and ground, and the quad stops 0.2 m short of them. Walls are tested at the camera (`DronePose.EyeHeight`, default 1.6 yards, the same number as `height` above). The ground test stays on the quad. Press F8 while the world window is focused to fly through those surfaces, and press it again to stop on them.
+
 On your own realm, `.cheat god` keeps that character from dying. It is not required for the pose.
 
 The character's body is hidden during the drone view and shown again when you walk. The view follows the quad. It does not stop at walls or terrain in the world.

@@ -46,6 +46,7 @@ $dll = Join-Path $Out "PoseBridge.dll"
     "/r:$(Join-Path $managed 'UnityEngine.dll')" `
     "/r:$(Join-Path $managed 'UnityEngine.CoreModule.dll')" `
     "/r:$(Join-Path $managed 'UnityEngine.PhysicsModule.dll')" `
+    "/r:$(Join-Path $managed 'UnityEngine.InputLegacyModule.dll')" `
     $pluginSources
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Built $dll"
